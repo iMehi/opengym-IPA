@@ -1,0 +1,27 @@
+{
+  "name": "openGym (self-built)",
+  "identifier": "com.iMehi.opengym.source",
+  "apps": [
+    {
+      "name": "openGym",
+      "bundleIdentifier": "ch.duartesantos.opengym",
+      "developerName": "iMehi",
+      "subtitle": "Self-hosted gym tracker",
+      "localizedDescription": "openGym standalone mobile app, built from source via GitHub Actions.",
+      "iconURL": "https://raw.githubusercontent.com/iMehi/opengym-IPA/main/assets/banner.png",
+      "version": "1.2.3.1",
+      "versionDate": "2026-10-13",
+      "downloadURL": "https://github.com/iMehi/opengym-IPA/releases/download/build-d6ee9d4/openGym.ipa",
+      "size": 2033759,
+      "versions": [
+        {
+          "version": "1.2.3.1",
+          "date": "2026-10-13",
+          "downloadURL": "https://github.com/iMehi/opengym-IPA/releases/download/build-d6ee9d4/openGym.ipa",
+          "size": 2033759
+        }
+      ]
+    }
+  ],
+  "news": []
+}
