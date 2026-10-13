@@ -1,0 +1,171 @@
+name: Build IPA + SideStore source
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md', 'docs/**']
+  schedule:
+    - cron: '0 5 * * 1'
+
+permissions:
+  contents: write
+
+env:
+  APP_NAME: openGym
+  ICON_URL: https://raw.githubusercontent.com/${{ github.repository }}/main/assets/banner.png
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check if this commit was already released
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="build-$(git rev-parse --short HEAD)"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ] && gh release view "$TAG" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Already released as $TAG, skipping."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.check.outputs.skip != 'true'
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        if: steps.check.outputs.skip != 'true'
+        working-directory: frontend
+        run: npm install
+
+      - name: Add iOS platform if missing
+        if: steps.check.outputs.skip != 'true'
+        working-directory: frontend
+        run: |
+          if [ ! -d ios ]; then
+            npm install @capacitor/ios
+            npx cap add ios
+          fi
+
+      - name: Build mobile bundle + cap sync
+        if: steps.check.outputs.skip != 'true'
+        working-directory: frontend
+        run: npm run build:mobile
+
+      - name: Set version (must match the source.json)
+        if: steps.check.outputs.skip != 'true'
+        id: ver
+        run: |
+          PKGVER=$(node -p "require('./frontend/package.json').version")
+          VERSION="$PKGVER.${{ github.run_number }}"
+          PLIST=frontend/ios/App/App/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" "$PLIST"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build iOS app (unsigned)
+        if: steps.check.outputs.skip != 'true'
+        working-directory: frontend/ios/App
+        run: |
+          if [ -f Podfile ]; then pod install; fi
+          if [ -d App.xcworkspace ] && [ -f Podfile ]; then
+            TARGET=(-workspace App.xcworkspace)
+          else
+            TARGET=(-project App.xcodeproj)
+          fi
+          xcodebuild "${TARGET[@]}" -scheme App \
+            -configuration Release -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
+
+      - name: Package IPA
+        if: steps.check.outputs.skip != 'true'
+        working-directory: frontend/ios/App
+        run: |
+          APP=$(find build/Build/Products -path "*Release-iphoneos/*.app" -maxdepth 4 | head -n 1)
+          echo "Found: $APP"
+          rm -rf Payload "$APP_NAME.ipa"
+          mkdir Payload
+          cp -R "$APP" Payload/
+          zip -qr "$APP_NAME.ipa" Payload
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist" > bundle_id.txt
+
+      - name: Create GitHub Release
+        if: steps.check.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.check.outputs.tag }}" \
+            "frontend/ios/App/$APP_NAME.ipa" \
+            --title "$APP_NAME ${{ steps.ver.outputs.version }}" \
+            --notes "Unsigned IPA for SideStore. Commit $(git rev-parse --short HEAD)."
+
+      - name: Publish SideStore source (branch 'sidestore')
+        if: steps.check.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+          TAG: ${{ steps.check.outputs.tag }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          BID=$(cat "frontend/ios/App/bundle_id.txt")
+          SIZE=$(stat -f%z "frontend/ios/App/$APP_NAME.ipa")
+          DATE=$(date -u +%Y-%m-%d)
+          URL="https://github.com/$REPO/releases/download/$TAG/$APP_NAME.ipa"
+
+          rm -rf /tmp/src && mkdir /tmp/src && cd /tmp/src
+          git init -q
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          if git fetch -q origin sidestore 2>/dev/null; then
+            git checkout -q -b sidestore FETCH_HEAD
+          else
+            git checkout -q -b sidestore
+          fi
+
+          OLD='[]'
+          [ -f source.json ] && OLD=$(jq '.apps[0].versions // []' source.json)
+          NEW=$(jq -n --arg v "$VERSION" --arg d "$DATE" --arg u "$URL" --argjson s "$SIZE" \
+                '{version:$v, date:$d, downloadURL:$u, size:$s}')
+          VERS=$(jq -n --argjson n "$NEW" --argjson o "$OLD" '([$n] + $o) | .[0:5]')
+
+          jq -n \
+            --arg name "$APP_NAME" --arg bid "$BID" --arg owner "$OWNER" \
+            --arg v "$VERSION" --arg d "$DATE" --arg u "$URL" --argjson s "$SIZE" \
+            --arg icon "$ICON_URL" --argjson vers "$VERS" \
+            '{
+              name: ($name + " (self-built)"),
+              identifier: ("com." + $owner + ".opengym.source"),
+              apps: [{
+                name: $name,
+                bundleIdentifier: $bid,
+                developerName: $owner,
+                subtitle: "Self-hosted gym tracker",
+                localizedDescription: "openGym standalone mobile app, built from source via GitHub Actions.",
+                iconURL: $icon,
+                version: $v,
+                versionDate: $d,
+                downloadURL: $u,
+                size: $s,
+                versions: $vers
+              }],
+              news: []
+            }' > source.json
+
+          git add source.json
+          git commit -q -m "Update source to $VERSION"
+          git push -q origin sidestore
+
+          SRC="https://raw.githubusercontent.com/$REPO/sidestore/source.json"
+          echo "### SideStore source URL" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`$SRC\`" >> "$GITHUB_STEP_SUMMARY"
